@@ -60,6 +60,64 @@ def plot_selected_images(dataset, selected_indices, labels, n_show=100,
     return fig
 
 
+def plot_tsne_projection(features, selected_indices_dict, figsize=(12, 10),
+                         save_path=None, title=None, max_points=5000):
+    """
+    Vẽ t-SNE projection của toàn bộ dataset và các điểm được chọn.
+
+    Args:
+        features: numpy array (n, 512)
+        selected_indices_dict: Dict {method_name: indices}
+        figsize: Kích thước figure
+        save_path: Đường dẫn lưu
+        title: Tiêu đề
+        max_points: Số điểm tối đa từ dataset gốc để vẽ (tránh lag)
+    """
+    from sklearn.manifold import TSNE
+    import pandas as pd
+    import seaborn as sns
+
+    n = features.shape[0]
+    if n > max_points:
+        indices = np.random.choice(n, max_points, replace=False)
+        features_subset = features[indices]
+    else:
+        features_subset = features
+        indices = np.arange(n)
+
+    print(f"Computing t-SNE for {len(features_subset)} points...")
+    tsne = TSNE(n_components=2, random_state=42, init='pca', learning_rate='auto')
+    embeds = tsne.fit_transform(features_subset)
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Vẽ toàn bộ dataset (mờ)
+    ax.scatter(embeds[:, 0], embeds[:, 1], c='lightgrey', s=5, alpha=0.5, label='Dataset')
+
+    # Ánh xạ selected_indices sang không gian subset nếu có
+    # Hoặc vẽ trực tiếp nếu selected_indices nằm trong subset
+    colors = plt.cm.get_cmap('tab10')
+
+    for i, (method, selected) in enumerate(selected_indices_dict.items()):
+        # Tìm các điểm selected nằm trong features_subset
+        subset_mask = np.isin(indices, selected)
+        if np.any(subset_mask):
+            selected_embeds = embeds[subset_mask]
+            ax.scatter(selected_embeds[:, 0], selected_embeds[:, 1],
+                       s=30, label=method, alpha=0.8, edgecolors='white', linewidth=0.5)
+
+    ax.set_title(title or "t-SNE Visualization of Selected Samples", fontsize=15)
+    ax.legend(markerscale=2)
+    ax.axis('off')
+
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"Saved to {save_path}")
+
+    plt.close()
+    return fig
+
+
 def plot_class_distribution(labels, selected_indices, class_names=None,
                             figsize=(14, 6), save_path=None, title=None):
     """

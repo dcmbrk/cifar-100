@@ -20,22 +20,25 @@ class FacilityLocation:
             return 0.0
         # Tránh tính toán trên toàn bộ ma trận nếu không cần thiết
         selected_indices = list(selected_indices)
-        max_sims = np.max(self.sim_matrix[:, selected_indices], axis=1)
+        # Sử dụng row access cho symmetric matrix để tối ưu memmap I/O
+        max_sims = np.max(self.sim_matrix[selected_indices, :], axis=0)
         return np.sum(max_sims)
 
     def marginal_gain(self, current_max_sims, new_idx):
         """
         Đã tối ưu: Chỉ nhận current_max_sims để tránh tính toán lại bên trong.
+        Sử dụng row access [new_idx, :] thay vì [:, new_idx] cho symmetric matrix.
         """
-        new_sims = self.sim_matrix[:, new_idx]
+        new_sims = self.sim_matrix[new_idx, :]
         improvements = np.maximum(0, new_sims - current_max_sims)
         return np.sum(improvements)
 
 
 class LazyGreedyFacilityLocation:
-    def __init__(self, similarity_matrix, verbose=True):
+    def __init__(self, similarity_matrix, features=None, verbose=True):
         self.facility_loc = FacilityLocation(similarity_matrix)
-        self.n = similarity_matrix.shape[0]
+        self.features = features
+        self.n = similarity_matrix.shape[0] if similarity_matrix is not None else features.shape[0]
         self.verbose = verbose
 
     def select(self, k):
@@ -50,9 +53,20 @@ class LazyGreedyFacilityLocation:
         if self.verbose:
             print(f"Initializing: Calculating initial gains for {self.n} points...")
 
-        # Thay vì loop 50,000 lần, ta tính tổng toàn bộ cột một lần duy nhất.
-        # Điều này giúp giảm số lần truy cập disk I/O từ 50,000 lần xuống còn 1 lần quét lớn.
-        initial_gains = np.array(self.facility_loc.sim_matrix.sum(axis=0)).flatten()
+        if self.features is not None:
+            # Tối ưu O(nd): g_0(v) = (sum_{u in V} u)^T v
+            # Với features đã chuẩn hóa L2, similarity = dot product
+            feature_sum = np.sum(self.features, axis=0)
+            initial_gains = np.dot(self.features, feature_sum)
+        else:
+            # Thay vì loop 50,000 lần hoặc dùng sum(axis=0) trực tiếp trên memmap (có thể chậm),
+            # ta tính theo batch để có progress bar và tận dụng sequential read.
+            initial_gains = np.zeros(self.n, dtype='float32')
+            batch_size = 1000
+            for i in tqdm(range(0, self.n, batch_size), desc="Initial scan", disable=not self.verbose):
+                end_i = min(i + batch_size, self.n)
+                # sum(axis=1) là row sum, rất nhanh cho C-order memmap
+                initial_gains[i:end_i] = self.facility_loc.sim_matrix[i:end_i, :].sum(axis=1)
 
         # Build heap trong O(N)
         # Priority queue: (-gain, iteration_computed, idx)
@@ -92,7 +106,8 @@ class LazyGreedyFacilityLocation:
             selected_set.add(best_idx)
 
             # Cập nhật current_max_sims: max(current_max, độ tương đồng với điểm mới chọn)
-            new_sims = self.facility_loc.sim_matrix[:, best_idx]
+            # Sử dụng row access [best_idx, :]
+            new_sims = self.facility_loc.sim_matrix[best_idx, :]
             current_max_sims = np.maximum(current_max_sims, new_sims)
 
             current_score = np.sum(current_max_sims)
@@ -108,17 +123,19 @@ class LazyGreedyFacilityLocation:
         return selected, scores, runtime
 
 
-def greedy_facility_location(similarity_matrix, k, lazy=True, verbose=True):
+def greedy_facility_location(similarity_matrix, k, features=None, lazy=True, verbose=True):
     """
     Wrapper function.
     Mặc định sử dụng LazyGreedy vì nó hiệu quả hơn rất nhiều cho tập dữ liệu lớn.
     """
     # Ép buộc dùng Lazy nếu dữ liệu lớn (> 10,000)
-    if similarity_matrix.shape[0] > 10000:
+    if similarity_matrix is not None and similarity_matrix.shape[0] > 10000:
+        lazy = True
+    elif features is not None and features.shape[0] > 10000:
         lazy = True
 
     if lazy:
-        algorithm = LazyGreedyFacilityLocation(similarity_matrix, verbose)
+        algorithm = LazyGreedyFacilityLocation(similarity_matrix, features, verbose)
     else:
         # Giữ lại class GreedyFacilityLocation cũ của bạn nếu cần,
         # nhưng LazyGreedy ở trên đã được tối ưu vượt trội.

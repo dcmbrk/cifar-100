@@ -29,7 +29,9 @@ from visualization import (
     plot_budget_analysis,
     plot_greedy_progress,
     plot_training_curves,
-    create_summary_figure
+    create_summary_figure,
+    plot_selected_images,
+    plot_tsne_projection
 )
 
 
@@ -74,7 +76,7 @@ def run_selection_methods(features, labels, similarity_matrix, k, seed=42, verbo
     Args:
         features: Feature vectors
         labels: Labels
-        similarity_matrix: Ma trận similarity
+        similarity_matrix: Ma trận similarity (có thể là None)
         k: Budget
         seed: Random seed
         verbose: In tiến trình
@@ -114,8 +116,17 @@ def run_selection_methods(features, labels, similarity_matrix, k, seed=42, verbo
     # 5. Greedy Facility Location
     if verbose:
         print("[5/5] Running Greedy Facility Location (Lazy)...")
+    
+    # Kiểm tra nếu similarity_matrix chưa được load/compute
+    if similarity_matrix is None:
+        print("Computing similarity matrix (required for Greedy FL)...")
+        sim_cache = Path('./data/cifar100_similarity.dat')
+        similarity_matrix = compute_similarity_matrix_memmap(
+            features, str(sim_cache), metric='cosine', batch_size=500
+        )
+    
     selected, scores, runtime = greedy_facility_location(
-        similarity_matrix, k, lazy=True, verbose=verbose
+        similarity_matrix, k, features=features, lazy=True, verbose=verbose
     )
     results['Greedy FL'] = {'indices': selected, 'runtime': runtime, 'scores': scores}
 
@@ -151,22 +162,22 @@ def run_full_experiment(args):
     )
     print(f"Features shape: {features.shape}")
 
-    # Compute similarity matrix (dùng memmap để tiết kiệm RAM)
-    print("\n[Step 3] Computing similarity matrix...")
-    sim_cache = Path(args.data_dir) / 'cifar100_similarity.dat'
-    n = features.shape[0]
-    if sim_cache.exists():
-        print(f"Loading from cache: {sim_cache}")
-        similarity_matrix = load_similarity_memmap(str(sim_cache), n)
-    else:
-        similarity_matrix = compute_similarity_matrix_memmap(
-            features, str(sim_cache), metric='cosine', batch_size=500
-        )
-        print(f"Saved to cache: {sim_cache}")
-    print(f"Similarity matrix shape: {similarity_matrix.shape}")
-
     # Run selection methods
     print("\n[Step 4] Running selection methods...")
+    
+    # Chỉ load/compute similarity matrix nếu cần (cho Greedy FL)
+    # Với Lazy Greedy tối ưu, ta có thể chạy mà không cần matrix nếu dùng on-the-fly,
+    # nhưng dự án hiện tại ưu tiên dùng matrix cache cho tốc độ vòng lặp.
+    sim_cache = Path(args.data_dir) / 'cifar100_similarity.dat'
+    n = features.shape[0]
+    similarity_matrix = None
+    
+    if sim_cache.exists():
+        print(f"Loading similarity matrix from cache: {sim_cache}")
+        similarity_matrix = load_similarity_memmap(str(sim_cache), n)
+    else:
+        print("Similarity matrix cache not found. It will be computed when needed for Greedy FL.")
+
     selection_results = run_selection_methods(
         features, labels, similarity_matrix,
         k=args.budget,
@@ -215,7 +226,27 @@ def run_full_experiment(args):
     print("\n[Step 7] Generating visualizations...")
     results_dir = Path('results/figures')
 
-    # Class distribution cho Greedy FL
+    # 1. Selected Images Grid cho tất cả các phương pháp
+    for method, result in selection_results.items():
+        method_name_clean = method.lower().replace(' ', '_')
+        plot_selected_images(
+            train_dataset, 
+            result['indices'], 
+            labels,
+            n_show=100,
+            save_path=results_dir / f'selected_images_{method_name_clean}_k{args.budget}.png',
+            title=f'{method} Selected Images (k={args.budget})'
+        )
+
+    # 2. t-SNE Projection
+    plot_tsne_projection(
+        features,
+        {m: r['indices'] for m, r in selection_results.items()},
+        save_path=results_dir / f'tsne_projection_k{args.budget}.png',
+        title=f't-SNE Visualization of Selection Methods (k={args.budget})'
+    )
+
+    # 3. Class distribution cho Greedy FL
     plot_class_distribution(
         labels,
         selection_results['Greedy FL']['indices'],
@@ -254,11 +285,11 @@ def run_full_experiment(args):
             return [convert_to_serializable(v) for v in obj]
         return obj
 
-    save_data = {
+    save_data = convert_to_serializable({
         'config': vars(args),
-        'metrics': convert_to_serializable(all_metrics),
+        'metrics': all_metrics,
         'selected_indices': {m: r['indices'] for m, r in selection_results.items()}
-    }
+    })
 
     with open(results_file, 'w') as f:
         json.dump(save_data, f, indent=2)
@@ -293,9 +324,11 @@ def run_budget_analysis(args):
 
     sim_cache = Path(args.data_dir) / 'cifar100_similarity.dat'
     n = features.shape[0]
+    similarity_matrix = None
     if sim_cache.exists():
         similarity_matrix = load_similarity_memmap(str(sim_cache), n)
     else:
+        print("Similarity matrix cache not found. Computing (required for Greedy FL)...")
         similarity_matrix = compute_similarity_matrix_memmap(
             features, str(sim_cache), metric='cosine', batch_size=500
         )

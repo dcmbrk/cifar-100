@@ -7,15 +7,16 @@ import numpy as np
 from collections import Counter
 
 
-def facility_location_score(similarity_matrix, selected_indices):
+def facility_location_score(similarity_matrix, selected_indices, features=None):
     """
     Tính Facility Location Score: f(S) = sum_{v in V} max_{s in S} sim(v, s)
 
     Đo mức độ "coverage" của tập S đối với toàn bộ V.
 
     Args:
-        similarity_matrix: numpy array (n, n)
+        similarity_matrix: numpy array (n, n) hoặc None
         selected_indices: List các indices được chọn
+        features: numpy array (n, d) nếu similarity_matrix là None
 
     Returns:
         score: FL Score (normalized by n)
@@ -24,7 +25,23 @@ def facility_location_score(similarity_matrix, selected_indices):
         return 0.0
 
     selected_indices = list(selected_indices)
-    max_sims = np.max(similarity_matrix[:, selected_indices], axis=1)
+    
+    if similarity_matrix is not None:
+        # Sử dụng row access cho symmetric matrix để tối ưu memmap I/O
+        max_sims = np.max(similarity_matrix[selected_indices, :], axis=0)
+    elif features is not None:
+        # Tính theo batch để tránh tràn bộ nhớ
+        n = features.shape[0]
+        max_sims = np.full(n, -np.inf)
+        selected_features = features[selected_indices]
+        
+        batch_size = 5000
+        for i in range(0, n, batch_size):
+            end_i = min(i + batch_size, n)
+            batch_sims = np.dot(features[i:end_i], selected_features.T)
+            max_sims[i:end_i] = np.max(batch_sims, axis=1)
+    else:
+        raise ValueError("Cần cung cấp similarity_matrix hoặc features")
 
     # Normalize by n để có giá trị trong [0, 1]
     score = np.mean(max_sims)
@@ -110,7 +127,7 @@ def diversity_score(features, selected_indices):
     return diversity
 
 
-def redundancy_score(similarity_matrix, selected_indices):
+def redundancy_score(similarity_matrix, selected_indices, features=None):
     """
     Tính Redundancy Score: Đo mức độ trùng lặp trong tập S.
 
@@ -118,8 +135,9 @@ def redundancy_score(similarity_matrix, selected_indices):
     Redundancy thấp = ít trùng lặp = tốt.
 
     Args:
-        similarity_matrix: numpy array (n, n)
+        similarity_matrix: numpy array (n, n) hoặc None
         selected_indices: List các indices
+        features: numpy array (n, d) nếu similarity_matrix là None
 
     Returns:
         redundancy: Average max similarity trong S (loại trừ chính nó)
@@ -131,7 +149,13 @@ def redundancy_score(similarity_matrix, selected_indices):
     k = len(selected_indices)
 
     # Ma trận similarity trong tập S
-    sub_sim = similarity_matrix[np.ix_(selected_indices, selected_indices)]
+    if similarity_matrix is not None:
+        sub_sim = similarity_matrix[np.ix_(selected_indices, selected_indices)]
+    elif features is not None:
+        selected_features = features[selected_indices]
+        sub_sim = np.dot(selected_features, selected_features.T)
+    else:
+        raise ValueError("Cần cung cấp similarity_matrix hoặc features")
 
     # Đặt diagonal = -inf để loại trừ chính nó
     np.fill_diagonal(sub_sim, -np.inf)
@@ -198,8 +222,9 @@ class CoresetEvaluator:
         if similarity_matrix is not None:
             self.similarity_matrix = similarity_matrix
         else:
-            # Tính cosine similarity (với features đã chuẩn hóa L2)
-            self.similarity_matrix = np.dot(features, features.T)
+            # Không tự động tính toàn bộ ma trận (tốn bộ nhớ)
+            # Các hàm metrics sẽ dùng features để tính on-the-fly
+            self.similarity_matrix = None
 
     def evaluate(self, selected_indices, verbose=True):
         """
@@ -216,10 +241,10 @@ class CoresetEvaluator:
         k = len(selected_indices)
 
         # Tính các metrics
-        fl_score = facility_location_score(self.similarity_matrix, selected_indices)
+        fl_score = facility_location_score(self.similarity_matrix, selected_indices, features=self.features)
         coverage, covered, total = class_coverage(self.labels, selected_indices)
         diversity = diversity_score(self.features, selected_indices)
-        redundancy = redundancy_score(self.similarity_matrix, selected_indices)
+        redundancy = redundancy_score(self.similarity_matrix, selected_indices, features=self.features)
         rep_error, per_class_error = representation_error(
             self.features, self.labels, selected_indices
         )
